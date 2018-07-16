@@ -59,19 +59,27 @@ class Table {
 
   /**
    * 批量增、删、改操作
-   * @param  {Object} data 批操作数据对象
-   * @return {Promise}     promise
+   * @param  {Object} batchOpData 批操作数据对象
+   * @return {Promise}            promise
    */
-  batchWrite (data) {
+  batchWrite (batchOpData) {
+    let rows = this.__parseObjectToBatchWriteRows(batchOpData)
     // 参数
     let params = {
       tables: [{
         tableName: this.tableName,
-        rows: this.__parseObjectToBatchWriteRows(data)
+        rows: rows
       }]
     }
     // 批操作
-    return this.__store.batchWriteRow(params).then((data) => data)
+    return this.__store.batchWriteRow(params).then((data) => {
+      // 获取结果
+      let arr = data.tables[this.tableName]
+      // 过滤非成功的项
+      rows = rows.filter((item, i) => { return (arr[i] || {}).isOk })
+      // 返回操作成功的项
+      return this.__parseBatchWriteRowsToObject(rows)
+    })
   }
 
   /**
@@ -87,6 +95,17 @@ class Table {
   }
 
   /**
+   * 保存多条数据（存在则更新）
+   * @param  {Array} rows  新数据行数组
+   * @return {Promise}     promise
+   */
+  batchPut (rows) {
+    if (!rows || !rows.length) return Promise.reject('参数无效')
+    // 批量新增
+    return this.batchWrite({ put: rows })
+  }
+
+  /**
    * 新增一条数据
    * @param  {Object} row 新数据行
    * @return {Promise}    promise
@@ -96,6 +115,17 @@ class Table {
     // 单条新增
     let params = this.__buildInsertRowParams(row)
     return this.__store.putRow(params).then(() => row)
+  }
+
+  /**
+   * 新增多条数据
+   * @param  {Array} rows  新数据行数组
+   * @return {Promise}     promise
+   */
+  batchInsert (rows) {
+    if (!rows || !rows.length) return Promise.reject('参数无效')
+    // 批量新增
+    return this.batchWrite({ insert: rows })
   }
 
   /**
@@ -111,6 +141,17 @@ class Table {
   }
 
   /**
+   * 删除多条数据
+   * @param  {Array} rows 待删除的数据行数组
+   * @return {Promise}    promise
+   */
+  batchDelete (rows) {
+    if (!rows || !rows.length) return Promise.reject('参数无效')
+    // 批量删除
+    return this.batchWrite({ delete: rows })
+  }
+
+  /**
    * 更新一条或多条数据
    * @param  {Object|Array} row 待更新的数据行
    * @return {Promise}      promise
@@ -120,6 +161,17 @@ class Table {
     // 单条更新
     let params = this.__buildUpdateRowParams(row)
     return this.__store.updateRow(params)
+  }
+
+  /**
+   * 更新多条数据
+   * @param  {Object|Array} rows 待更新的数据行数组
+   * @return {Promise}     promise
+   */
+  batchUpdate (rows) {
+    if (!rows || rows.length === 0) return Promise.reject('参数无效')
+    // 批量更新
+    return this.batchWrite({ update: rows })
   }
 
   /**
@@ -148,6 +200,144 @@ class Table {
       if (Object.keys(row).length === 0) return null
       return this.__parseDataToRow(row)
     })
+  }
+
+  /**
+   * 根据主键集合获取多条数据
+   * @param  {Object} rows        带主键的行数组
+   * @param  {Object} options     选项
+   * @return {Promise}            promise
+   */
+  batchGet (rows, options) {
+    if (!rows || !rows.length) return Promise.reject('参数无效')
+
+    // options
+    options = options || {}
+
+    // params
+    let params = {
+      tables: [{
+        tableName: this.tableName,
+        primaryKey: rows.map(row => this.__parseRowToPrimaryKey(row, '')),
+        startColumn: options.startColumn,
+        endColumn: options.endColumn
+      }]
+    }
+
+    // getRow
+    return this.__store.batchGetRow(params).then((data) => {
+      let arr = data.tables[0] || []
+      if (!arr.length) return arr
+      // parse
+      arr = arr.filter((item) => item.isOk)
+      return arr.map((item) => this.__parseDataToRow(item))
+    })
+  }
+
+  /**
+   * 读取指定主键范围内的数据
+   * @param  {Object} startRow    起始主键行
+   * @param  {Object} endRow      结束主键行
+   * @param  {Object} options     选项
+   * @return {Promise}            promise
+   */
+  getRange (startRow, endRow, options) {
+    // options
+    options = options || { __rows: [] }
+
+    // params
+    let params = {
+      tableName: this.tableName,
+      direction: Store.Direction.FORWARD,
+      inclusiveStartPrimaryKey: this.__parseRowToPrimaryKey(startRow, Store.INF_MIN),
+      exclusiveEndPrimaryKey: this.__parseRowToPrimaryKey(endRow, Store.INF_MAX),
+      startColumn: options.startColumn,
+      endColumn: options.endColumn,
+      limit: 5
+    }
+
+    // 异步递归获取
+    return this.__store.getRange(params).then((data) => {
+      options.__rows = options.__rows.concat(data.rows)
+      if (data.next_start_primary_key) {
+        data.next_start_primary_key.forEach((item) => { startRow[item.name] = item.value })
+        return this.getRange(startRow, endRow, options)
+      } else {
+        return options.__rows.map((item) => this.__parseDataToRow(item))
+      }
+    })
+  }
+
+  /**
+   * 读取指定主键范围内的数据
+   * @param  {Object} options              查询选项
+   * @param  {Object} options.where        带分区键的条件
+   * @param  {Number} options.limit        每页多少条
+   * @param  {Number} options.page         获取第几页
+   * @param  {String} options.startColumn  获取第几页
+   * @param  {String} options.endColumn    获取第几页
+   * @return {Promise}             promise
+   */
+  select (options) {
+    options = Object.assign({
+      where: {},
+      limit: 10,
+      page: 1,
+      startColumn: null,
+      endColumn: null
+    }, options)
+
+    let page = options.page <= 0 ? 1 : options.page
+    let isFirst = (page === 1)
+    let offset = (page - 1) * options.limit
+
+    // params
+    let params = {
+      tableName: this.tableName,
+      direction: Store.Direction.FORWARD,
+      inclusiveStartPrimaryKey: this.__parseRowToPrimaryKey(options.where, Store.INF_MIN),
+      exclusiveEndPrimaryKey: this.__parseRowToPrimaryKey({}, Store.INF_MAX),
+      startColumn: isFirst ? options.startColumn : '_',
+      endColumn: isFirst ? options.endColumn : '__',
+      limit: isFirst ? options.limit : offset
+    }
+
+    // 获取分页数据
+    return this.__store.getRange(params).then((data) => {
+      if (isFirst) {
+        // 获取首页数据
+        return data.rows
+      } else if (data.next_start_primary_key) {
+        // 获取非首页数据
+        params.startColumn = options.startColumn
+        params.endColumn = options.endColumn
+        params.limit = options.limit
+        params.inclusiveStartPrimaryKey = data.next_start_primary_key.map((item) => ({[item.name]: item.value}))
+        return this.__store.getRange(params).then((data) => (data.rows || []))
+      } else {
+        // 获取的页码超过总页数
+        return []
+      }
+    }).then((rows) => {
+      return rows.map((item) => this.__parseDataToRow(item))
+    })
+  }
+
+  /**
+   * 验证一行数据是否为该表的有效数据
+   * @param  {Object} row 数据行
+   * @return {Boolean}    是否有效
+   */
+  validateRow (row) {
+    if (!row) return false
+    let result = true
+    this.primaryKeys.forEach((item) => {
+      if (!row.hasOwnProperty(item.name)) {
+        result = false
+        return false
+      }
+    })
+    return result
   }
 
   // ================ 构建 putRow/insertRow/deleteRow 参数 ================
@@ -277,6 +467,7 @@ class Table {
    */
   __parseObjectToBatchWriteRows (obj) {
     let writeRows = []
+    // parse
     for (let key in obj) {
       let op = key.toLocaleUpperCase()
       let rows = obj[key] || []
@@ -311,10 +502,52 @@ class Table {
         }
       })
     }
+    // return
     return writeRows
   }
 
-  // ================ 将 data 转换为 row 结构 ================
+  /**
+   * 将批量写 rows 转换为批操作对象
+   * @param  {Object} obj 批操作对象
+   * @return {Array}      批量写 rows
+   */
+  __parseBatchWriteRowsToObject (writeRows) {
+    let obj = {
+      put: [],
+      insert: [],
+      update: [],
+      delete: []
+    }
+
+    // parse
+    writeRows.forEach((item) => {
+      let row = this.__parseParamsToRow(item)
+      switch (item.type) {
+        case 'PUT':
+          obj.put.push(row)
+        break;
+        case 'INSERT':
+          obj.insert.push(row)
+        break;
+        case 'UPDATE':
+          obj.update.push(row)
+        break;
+        case 'DELETE':
+          obj.delete.push(row)
+        break;
+      }
+    })
+
+    return obj
+  }
+
+  // ================ 将 data/params 转换为 row 结构 ================
+
+  /**
+   * 将从数据库获取的数据转换为 row 对象
+   * @param  {Object} data 数据对象
+   * @return {Object}      row 对象
+   */
   __parseDataToRow (data) {
     let row = { }
 
@@ -329,6 +562,31 @@ class Table {
     if (data.attributes instanceof Array) {
       data.attributes.forEach((item) => {
         row[item.columnName] = item.columnValue
+      })
+    }
+
+    return row
+  }
+
+  /**
+   * 将参数对象转换为 row 对象
+   * @param  {Object} params 数据对象
+   * @return {Object}      row 对象
+   */
+  __parseParamsToRow (params) {
+    let row = { }
+
+    // 主键列
+    if (params.primaryKey instanceof Array) {
+      params.primaryKey.forEach((item) => {
+        Object.assign(row, item)
+      })
+    }
+
+    // 属性列
+    if (params.attributeColumns instanceof Array) {
+      params.attributeColumns.forEach((item) => {
+        Object.assign(row, item)
       })
     }
 
