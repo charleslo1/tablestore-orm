@@ -18,10 +18,12 @@ class TableStore extends Client {
   }
 
   /**
-   * 同步 meta 数据
+   * 同步 tables 数据
    */
-  sync () {
-
+  async sync () {
+    let result = await this.listTable();
+    let tableNames = result.table_names || [];
+    tableNames.forEach((name) => this.defineTable(name));
   }
 
   /**

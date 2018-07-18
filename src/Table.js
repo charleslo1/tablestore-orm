@@ -9,7 +9,7 @@ class Table {
    * @param  {TableStore} store     TableStore实例
    * @param  {String}     tableName 表名
    */
-  constructor (tableName, options) {
+  constructor (tableName = '', options = {}) {
     this.__store = null
 
     // tableName
@@ -42,21 +42,15 @@ class Table {
   /**
    * 同步 meta 数据
    */
-  sync (force = false) {
+  async sync (force = false) {
     if (this.isSynced && !force) {
-      return Promise.resolve(this)
+      return this
     } else {
-      return new Promise((resolve, reject) => {
-        // 获取表 meta 数据
-        this.__store.describeTable({
-          tableName: this.tableName
-        }).then((err, data) => {
-          if (err) reject(err)
-          this.primaryKeys = data.table_meta.primary_key
-          this.isSynced = true
-          resolve(this)
-        });
-      })
+      // 获取表 meta 数据
+      let data = await this.__store.describeTable({ tableName: this.tableName })
+      this.primaryKeys = data.table_meta.primary_key
+      this.isSynced = true
+      return this
     }
   }
 
@@ -65,9 +59,11 @@ class Table {
    * @param  {Object} batchOpData 批操作数据对象
    * @return {Promise}            promise
    */
-  batchWrite (batchOpData) {
-    let rows = this.__parseObjectToBatchWriteRows(batchOpData)
+  async batchWrite (batchOpData) {
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
     // 参数
+    let rows = this.__parseObjectToBatchWriteRows(batchOpData);
     let params = {
       tables: [{
         tableName: this.tableName,
@@ -75,14 +71,13 @@ class Table {
       }]
     }
     // 批操作
-    return this.__store.batchWriteRow(params).then((data) => {
-      // 获取结果
-      let arr = data.tables[this.tableName]
-      // 过滤非成功的项
-      rows = rows.filter((item, i) => { return (arr[i] || {}).isOk })
-      // 返回操作成功的项
-      return this.__parseBatchWriteRowsToObject(rows)
-    })
+    let data = await this.__store.batchWriteRow(params);
+    // 获取结果
+    let arr = data.tables[this.tableName];
+    // 过滤非成功的项
+    rows = rows.filter((item, i) => { return (arr[i] || {}).isOk });
+    // 返回操作成功的项
+    return this.__parseBatchWriteRowsToObject(rows);
   }
 
   /**
@@ -90,11 +85,14 @@ class Table {
    * @param  {Object} row 新数据行
    * @return {Promise}    promise
    */
-  put (row) {
-    if (!row) return Promise.reject('参数无效')
+  async put (row) {
+    if (!row) return Promise.reject('参数无效');
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
     // 单条新增
-    let params = this.__buildPutRowParams(row)
-    return this.__store.putRow(params).then(() => row)
+    let params = this.__buildPutRowParams(row);
+    await this.__store.putRow(params);
+    return row;
   }
 
   /**
@@ -102,10 +100,11 @@ class Table {
    * @param  {Array} rows  新数据行数组
    * @return {Promise}     promise
    */
-  batchPut (rows) {
-    if (!rows || !rows.length) return Promise.reject('参数无效')
+  async batchPut (rows) {
+    if (!rows || !rows.length) return Promise.reject('参数无效');
     // 批量新增
-    return this.batchWrite({ put: rows }).then((data) => data.put)
+    let data = await this.batchWrite({ put: rows });
+    return data.put;
   }
 
   /**
@@ -113,11 +112,14 @@ class Table {
    * @param  {Object} row 新数据行
    * @return {Promise}    promise
    */
-  insert (row) {
-    if (!row) return Promise.reject('参数无效')
+  async insert (row) {
+    if (!row) return Promise.reject('参数无效');
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
     // 单条新增
     let params = this.__buildInsertRowParams(row)
-    return this.__store.putRow(params).then(() => row)
+    await this.__store.putRow(params);
+    return row;
   }
 
   /**
@@ -125,10 +127,11 @@ class Table {
    * @param  {Array} rows  新数据行数组
    * @return {Promise}     promise
    */
-  batchInsert (rows) {
-    if (!rows || !rows.length) return Promise.reject('参数无效')
+  async batchInsert (rows) {
+    if (!rows || !rows.length) return Promise.reject('参数无效');
     // 批量新增
-    return this.batchWrite({ insert: rows }).then((data) => data.insert)
+    let data = await this.batchWrite({ insert: rows });
+    return data.insert;
   }
 
   /**
@@ -136,11 +139,14 @@ class Table {
    * @param  {Object} row 待删除的数据行
    * @return {Promise}    promise
    */
-  delete (row) {
-    if (!row) return Promise.reject('参数无效')
+  async delete (row) {
+    if (!row) return Promise.reject('参数无效');
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
     // 单条删除
-    let params = this.__buildDeleteRowParams(row)
-    return this.__store.deleteRow(params).then(() => row)
+    let params = this.__buildDeleteRowParams(row);
+    await this.__store.deleteRow(params);
+    return row;
   }
 
   /**
@@ -148,10 +154,11 @@ class Table {
    * @param  {Array} rows 待删除的数据行数组
    * @return {Promise}    promise
    */
-  batchDelete (rows) {
-    if (!rows || !rows.length) return Promise.reject('参数无效')
+  async batchDelete (rows) {
+    if (!rows || !rows.length) return Promise.reject('参数无效');
     // 批量删除
-    return this.batchWrite({ delete: rows }).then((data) => data.delete)
+    let data = await this.batchWrite({ delete: rows });
+    return data.delete;
   }
 
   /**
@@ -159,11 +166,14 @@ class Table {
    * @param  {Object|Array} row 待更新的数据行
    * @return {Promise}      promise
    */
-  update (row) {
-    if (!row) return Promise.reject('参数无效')
+  async update (row) {
+    if (!row) return Promise.reject('参数无效');
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
     // 单条更新
-    let params = this.__buildUpdateRowParams(row)
-    return this.__store.updateRow(params)
+    let params = this.__buildUpdateRowParams(row);
+    let data = await this.__store.updateRow(params);
+    return data;
   }
 
   /**
@@ -171,10 +181,11 @@ class Table {
    * @param  {Object|Array} rows 待更新的数据行数组
    * @return {Promise}     promise
    */
-  batchUpdate (rows) {
-    if (!rows || rows.length === 0) return Promise.reject('参数无效')
+  async batchUpdate (rows) {
+    if (!rows || rows.length === 0) return Promise.reject('参数无效');
     // 批量更新
-    return this.batchWrite({ update: rows })
+    let data = await this.batchWrite({ update: rows });
+    return data;
   }
 
   /**
@@ -183,8 +194,10 @@ class Table {
    * @param  {Object} options     选项
    * @return {Promise}            promise
    */
-  get (row, options) {
-    if (!row) return Promise.reject('参数无效')
+  async get (row, options) {
+    if (!row) return Promise.reject('参数无效');
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
 
     // options
     options = options || {}
@@ -198,11 +211,10 @@ class Table {
     }
 
     // getRow
-    return this.__store.getRow(params).then((data) => {
-      let row = data.row
-      if (Object.keys(row).length === 0) return null
-      return this.__parseDataToRow(row)
-    })
+    let data = await this.__store.getRow(params);
+    row = data.row;
+    if (Object.keys(row).length === 0) return null;
+    return this.__parseDataToRow(row);
   }
 
   /**
@@ -211,8 +223,10 @@ class Table {
    * @param  {Object} options     选项
    * @return {Promise}            promise
    */
-  batchGet (rows, options) {
-    if (!rows || !rows.length) return Promise.reject('参数无效')
+  async batchGet (rows, options) {
+    if (!rows || !rows.length) return Promise.reject('参数无效');
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
 
     // options
     options = options || {}
@@ -228,13 +242,12 @@ class Table {
     }
 
     // getRow
-    return this.__store.batchGetRow(params).then((data) => {
-      let arr = data.tables[0] || []
-      if (!arr.length) return arr
-      // parse
-      arr = arr.filter((item) => item.isOk)
-      return arr.map((item) => this.__parseDataToRow(item))
-    })
+    let data = await this.__store.batchGetRow(params);
+    let arr = data.tables[0] || [];
+    if (!arr.length) return arr;
+    // parse
+    arr = arr.filter((item) => item.primaryKey);
+    return arr.map((item) => this.__parseDataToRow(item));
   }
 
   /**
@@ -244,7 +257,10 @@ class Table {
    * @param  {Object} options     选项
    * @return {Promise}            promise
    */
-  getRange (startRow, endRow, options) {
+  async getRange (startRow, endRow, options) {
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
+
     // options
     options = options || { __rows: [] }
 
@@ -260,15 +276,14 @@ class Table {
     }
 
     // 异步递归获取
-    return this.__store.getRange(params).then((data) => {
-      options.__rows = options.__rows.concat(data.rows)
-      if (data.next_start_primary_key) {
-        data.next_start_primary_key.forEach((item) => { startRow[item.name] = item.value })
-        return this.getRange(startRow, endRow, options)
-      } else {
-        return options.__rows.map((item) => this.__parseDataToRow(item))
-      }
-    })
+    let data = await this.__store.getRange(params);
+    options.__rows = options.__rows.concat(data.rows);
+    if (data.next_start_primary_key) {
+      data.next_start_primary_key.forEach((item) => { startRow[item.name] = item.value });
+      return this.getRange(startRow, endRow, options);
+    } else {
+      return options.__rows.map((item) => this.__parseDataToRow(item));
+    }
   }
 
   /**
@@ -281,7 +296,11 @@ class Table {
    * @param  {String} options.endColumn    获取第几页
    * @return {Promise}             promise
    */
-  select (options) {
+  async select (options) {
+    // 同步表 meta
+    if (!this.isSynced) await this.sync();
+
+    // options
     options = Object.assign({
       where: {},
       limit: 10,
