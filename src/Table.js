@@ -1,5 +1,8 @@
 const Store = require('tablestore')
 
+/**
+ * Table 类
+ */
 class Table {
   /**
    * 构造函数
@@ -102,7 +105,7 @@ class Table {
   batchPut (rows) {
     if (!rows || !rows.length) return Promise.reject('参数无效')
     // 批量新增
-    return this.batchWrite({ put: rows })
+    return this.batchWrite({ put: rows }).then((data) => data.put)
   }
 
   /**
@@ -125,7 +128,7 @@ class Table {
   batchInsert (rows) {
     if (!rows || !rows.length) return Promise.reject('参数无效')
     // 批量新增
-    return this.batchWrite({ insert: rows })
+    return this.batchWrite({ insert: rows }).then((data) => data.insert)
   }
 
   /**
@@ -148,7 +151,7 @@ class Table {
   batchDelete (rows) {
     if (!rows || !rows.length) return Promise.reject('参数无效')
     // 批量删除
-    return this.batchWrite({ delete: rows })
+    return this.batchWrite({ delete: rows }).then((data) => data.delete)
   }
 
   /**
@@ -351,6 +354,7 @@ class Table {
   __buildPutRowParams (row, condition) {
     condition = condition || new Store.Condition(Store.RowExistenceExpectation.IGNORE, null)
     return {
+      type: 'PUT',
       tableName: this.tableName,
       condition: condition,
       primaryKey: this.__parseRowToPrimaryKey(row),
@@ -381,6 +385,7 @@ class Table {
   __buildDeleteRowParams (row, condition) {
     condition = condition || new Store.Condition(Store.RowExistenceExpectation.IGNORE, null)
     return {
+      type: 'DELETE',
       tableName: this.tableName,
       condition: condition,
       primaryKey: this.__parseRowToPrimaryKey(row)
@@ -397,6 +402,7 @@ class Table {
     condition = condition || new Store.Condition(Store.RowExistenceExpectation.EXPECT_EXIST, null)
     let attributeColumns = this.__parseRowToUpdateOfAttributeColumns(row)
     return {
+      type: 'UPDATE',
       tableName: this.tableName,
       condition: condition,
       primaryKey: this.__parseRowToPrimaryKey(row),
@@ -477,25 +483,25 @@ class Table {
         switch (op) {
           case 'PUT':
             item = this.__buildPutRowParams(row)
-            item.type = 'PUT'
+            item.__op = op
             delete item.tableName
             writeRows.push(item)
           break;
           case 'INSERT':
             item = this.__buildInsertRowParams(row)
-            item.type = 'PUT'
+            item.__op = op
             delete item.tableName
             writeRows.push(item)
           break;
           case 'UPDATE':
             item = this.__buildUpdateRowParams(row)
-            item.type = 'UPDATE'
+            item.__op = op
             delete item.tableName
             writeRows.push(item)
           break;
           case 'DELETE':
             item = this.__buildDeleteRowParams(row)
-            item.type = 'DELETE'
+            item.__op = op
             delete item.tableName
             writeRows.push(item)
           break;
@@ -522,7 +528,8 @@ class Table {
     // parse
     writeRows.forEach((item) => {
       let row = this.__parseParamsToRow(item)
-      switch (item.type) {
+      let op = item.__op || item.type
+      switch (op) {
         case 'PUT':
           obj.put.push(row)
         break;
