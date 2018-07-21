@@ -252,37 +252,47 @@ class Table {
 
   /**
    * 读取指定主键范围内的数据
-   * @param  {Object} startRow    起始主键行
-   * @param  {Object} endRow      结束主键行
    * @param  {Object} options     选项
+   * @param  {Object} options.startRow      起始主键行
+   * @param  {Object} options.endRow        结束主键行
+   * @param  {Object} options.startColumn   起始属性列
+   * @param  {Object} options.endColumn     结束属性列
    * @return {Promise}            promise
    */
-  async getRange (startRow, endRow, options) {
+  async getRange (options) {
     // 同步表 meta
     if (!this.isSynced) await this.sync();
 
     // options
-    options = options || { __rows: [] }
+    options = options || { startRow: {}, __rows: [] };
+    options.startRow = options.startRow || {};
+    options.__rows = options.__rows || [];
 
     // params
     let params = {
       tableName: this.tableName,
       direction: Store.Direction.FORWARD,
-      inclusiveStartPrimaryKey: this.__parseRowToPrimaryKey(startRow, Store.INF_MIN),
-      exclusiveEndPrimaryKey: this.__parseRowToPrimaryKey(endRow, Store.INF_MAX),
+      inclusiveStartPrimaryKey: this.__parseRowToPrimaryKey(options.startRow, Store.INF_MIN),
+      exclusiveEndPrimaryKey: this.__parseRowToPrimaryKey(options.endRow, Store.INF_MAX),
       startColumn: options.startColumn,
       endColumn: options.endColumn,
-      limit: 5
+      limit: 5000
     }
 
-    // 异步递归获取
-    let data = await this.__store.getRange(params);
-    options.__rows = options.__rows.concat(data.rows);
-    if (data.next_start_primary_key) {
-      data.next_start_primary_key.forEach((item) => { startRow[item.name] = item.value });
-      return this.getRange(startRow, endRow, options);
-    } else {
-      return options.__rows.map((item) => this.__parseDataToRow(item));
+    try {
+      // 异步递归获取
+      let data = await this.__store.getRange(params);
+      options.__rows = options.__rows.concat(data.rows);
+      if (data.next_start_primary_key) {
+        data.next_start_primary_key.forEach((item) => { options.startRow[item.name] = item.value });
+        return this.getRange(options);
+      } else {
+        return options.__rows.map((item) => this.__parseDataToRow(item));
+      }
+    } catch (err) {
+      if (err.code === 400) {
+        return []
+      }
     }
   }
 
@@ -318,7 +328,7 @@ class Table {
       tableName: this.tableName,
       direction: Store.Direction.FORWARD,
       inclusiveStartPrimaryKey: this.__parseRowToPrimaryKey(options.where, Store.INF_MIN),
-      exclusiveEndPrimaryKey: this.__parseRowToPrimaryKey({}, Store.INF_MAX),
+      exclusiveEndPrimaryKey: this.__parseRowToPrimaryKey(options.where, Store.INF_MAX),
       startColumn: isFirst ? options.startColumn : '_',
       endColumn: isFirst ? options.endColumn : '__',
       limit: isFirst ? options.limit : offset
@@ -342,6 +352,15 @@ class Table {
       }
     }).then((rows) => {
       return rows.map((item) => this.__parseDataToRow(item))
+    }).catch(async (err) => {
+      if (err.code === 400) {
+        let row = await this.get(options.where)
+        if (row) {
+          return [row]
+        } else {
+          return null
+        }
+      }
     })
   }
 
@@ -363,15 +382,74 @@ class Table {
   }
 
   // ================ 构建 putRow/insertRow/deleteRow 参数 ================
+  /**
+   * 将条件对象转换为 ColumnCondition
+   * @param  {Object} where     条件对象
+   * @return {ColumnCondition}  ColumnCondition
+   */
+  parseWhereToColumnCondition (where = {}) {
+    let keys = Object.keys(where);
+    if (!keys.length) return null;
+
+    let conditions = [];
+    for (let key in where) {
+      let value = where[key];
+      if (value instanceof Array) {
+        let comparatorType = this.parseComparatorType(value[0])
+        conditions.push(new Store.SingleColumnCondition(key, value[1], comparatorType));
+      } else {
+        conditions.push(new Store.SingleColumnCondition(key, value, Store.ComparatorType.EQUAL));
+      }
+    }
+
+    if (conditions.length === 1) {
+      return conditions[0];
+    } else {
+      let condition = new Store.CompositeCondition(Store.LogicalOperator.AND);
+      conditions.forEach((item) => condition.addSubCondition(item));
+      return condition;
+    }
+  }
+
+  /**
+   * 将比较操作符转换为 ComparatorType
+   * @param  {String}   op      比较操作符
+   * @return {ComparatorType}   ComparatorType
+   */
+  parseComparatorType (op = '') {
+    switch(op.trim()) {
+      case '==':
+        return Store.ComparatorType.EQUAL;
+      break;
+      case '!=':
+        return Store.ComparatorType.NOT_EQUAL;
+      break;
+      case '>':
+        return Store.ComparatorType.GREATER_THAN;
+      break;
+      case '>=':
+        return Store.ComparatorType.GREATER_EQUAL;
+      break;
+      case '<':
+        return Store.ComparatorType.LESS_THAN;
+      break;
+      case '<=':
+        return Store.ComparatorType.LESS_EQUAL;
+      break;
+      default:
+        return Store.ComparatorType.EQUAL;
+      break;
+    }
+  }
 
   /**
    * 构建 putRow 参数
-   * @param  {Object} row       数据行
-   * @param  {Condition} [condition] 条件（可选，默认 RowExistenceExpectation.IGNORE）
-   * @return {Object}           putRow 参数
+   * @param  {Object} row         数据行
+   * @param  {Object} [where]     条件（可选）
+   * @return {Object}             putRow 参数
    */
-  __buildPutRowParams (row, condition) {
-    condition = condition || new Store.Condition(Store.RowExistenceExpectation.IGNORE, null)
+  __buildPutRowParams (row, where) {
+    let condition = new Store.Condition(Store.RowExistenceExpectation.IGNORE, this.parseWhereToColumnCondition(where));
     return {
       type: 'PUT',
       tableName: this.tableName,
@@ -386,23 +464,22 @@ class Table {
 
   /**
    * 构建 insertRow 参数
-   * @param  {Object} row       数据行
-   * @param  {Condition} [condition] 条件（可选，默认 RowExistenceExpectation.EXPECT_NOT_EXIST）
-   * @return {Object}           putRow 参数
+   * @param  {Object} row         数据行
+   * @return {Object}             putRow 参数
    */
-  __buildInsertRowParams (row, condition) {
-    condition = condition || new Store.Condition(Store.RowExistenceExpectation.EXPECT_NOT_EXIST, null)
-    return this.__buildPutRowParams(row, condition)
+  __buildInsertRowParams (row) {
+    let condition = new Store.Condition(Store.RowExistenceExpectation.EXPECT_NOT_EXIST, null)
+    return this.__buildPutRowParams(row, where)
   }
 
   /**
    * 构建 deleteRow 参数
-   * @param  {Object} row       数据行
-   * @param  {Condition} [condition] 条件（可选，默认 RowExistenceExpectation.IGNORE）
-   * @return {Object}           deleteRow 参数
+   * @param  {Object} row         数据行
+   * @param  {Object} [where]     条件（可选）
+   * @return {Object}             deleteRow 参数
    */
-  __buildDeleteRowParams (row, condition) {
-    condition = condition || new Store.Condition(Store.RowExistenceExpectation.IGNORE, null)
+  __buildDeleteRowParams (row, where) {
+    let condition = new Store.Condition(Store.RowExistenceExpectation.IGNORE, this.parseWhereToColumnCondition(where));
     return {
       type: 'DELETE',
       tableName: this.tableName,
@@ -413,12 +490,12 @@ class Table {
 
   /**
    * 构建 updateRow 参数（与 putRow、batchWriteRow 兼容）
-   * @param  {Object} row       数据行
-   * @param  {Condition} [condition] 条件（可选，默认 RowExistenceExpectation.EXPECT_EXIST）
-   * @return {Object}           updateRow 参数
+   * @param  {Object} row         数据行
+   * @param  {Object} [where]     条件（可选）
+   * @return {Object}             updateRow 参数
    */
-  __buildUpdateRowParams (row, condition) {
-    condition = condition || new Store.Condition(Store.RowExistenceExpectation.EXPECT_EXIST, null)
+  __buildUpdateRowParams (row, where) {
+    let condition = new Store.Condition(Store.RowExistenceExpectation.EXPECT_EXIST, this.parseWhereToColumnCondition(where));
     let attributeColumns = this.__parseRowToUpdateOfAttributeColumns(row)
     return {
       type: 'UPDATE',
@@ -501,7 +578,7 @@ class Table {
         let item = null
         switch (op) {
           case 'PUT':
-            item = this.__buildPutRowParams(row)
+            item = this.__buildPutRowParams(row, row.$where)
             item.__op = op
             delete item.tableName
             writeRows.push(item)
@@ -513,13 +590,13 @@ class Table {
             writeRows.push(item)
           break;
           case 'UPDATE':
-            item = this.__buildUpdateRowParams(row)
+            item = this.__buildUpdateRowParams(row, row.$where)
             item.__op = op
             delete item.tableName
             writeRows.push(item)
           break;
           case 'DELETE':
-            item = this.__buildDeleteRowParams(row)
+            item = this.__buildDeleteRowParams(row, row.$where)
             item.__op = op
             delete item.tableName
             writeRows.push(item)
@@ -576,18 +653,27 @@ class Table {
    */
   __parseDataToRow (data) {
     let row = { }
+    let OBJECT = 'object'
 
     // 主键列
     if (data.primaryKey instanceof Array) {
       data.primaryKey.forEach((item) => {
-        row[item.name] = item.value
+        if (typeof(item.value) === OBJECT) {
+          row[item.name] = parseInt(item.value.toString());
+        } else {
+          row[item.name] = item.value;
+        }
       })
     }
 
     // 属性列
     if (data.attributes instanceof Array) {
       data.attributes.forEach((item) => {
-        row[item.columnName] = item.columnValue
+        if (typeof(item.columnValue) === OBJECT) {
+          row[item.columnName] = parseInt(item.columnValue.toString());
+        } else {
+          row[item.columnName] = item.columnValue;
+        }
       })
     }
 
